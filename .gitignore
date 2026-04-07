@@ -1,5 +1,7 @@
-# Test credentials
-/app/memory/test_credentials.md
+# Test credentials and memory directories
+/app/memory/
+backend/memory/
+memory/test_credentials.md
 
 # Node modules
 node_modules/
@@ -45,18 +47,6 @@ Thumbs.db
 # Environment
 .env.local
 .env.*.local
-frontend/node_modules/.cache/default-development/5.pack
--e 
-# Environment files
 *.env
 *.env.*
-frontend/node_modules/.cache/default-development/1.pack
--e 
-# Environment files
-*.env
-*.env.*
-frontend/node_modules/.cache/default-development/2.pack
--e 
-# Environment files
-*.env
-*.env.*
+frontend/node_modules/.cache/default-development/0.pack

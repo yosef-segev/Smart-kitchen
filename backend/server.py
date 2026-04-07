@@ -896,8 +896,12 @@ async def startup_event():
             {'$set': {'password_hash': hash_password(admin_password)}}
         )
     
-    Path('/app/memory').mkdir(exist_ok=True)
-    with open('/app/memory/test_credentials.md', 'w') as f:
+    # Create memory directory relative to the backend folder
+    memory_dir = ROOT_DIR / 'memory'
+    memory_dir.mkdir(exist_ok=True)
+    
+    credentials_file = memory_dir / 'test_credentials.md'
+    with open(credentials_file, 'w') as f:
         f.write(f"""# Test Credentials
 
 ## Admin Account
