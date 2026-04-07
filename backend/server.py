@@ -14,7 +14,8 @@ from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 import bcrypt
 import jwt
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import logging
 import uuid
 import cloudinary
@@ -41,12 +42,14 @@ APP_NAME = os.environ.get('APP_NAME', 'freshtrack')
 
 # Gemini AI configuration
 GEMINI_API_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+gemini_client = None
 
 def init_gemini():
     """Initialize Gemini AI using EMERGENT_LLM_KEY environment variable"""
+    global gemini_client
     try:
         if GEMINI_API_KEY:
-            genai.configure(api_key=GEMINI_API_KEY)
+            gemini_client = genai.Client(api_key=GEMINI_API_KEY)
             logger.info("Gemini AI initialized successfully")
         else:
             logger.warning("EMERGENT_LLM_KEY not configured. Recipe generation will not work.")
@@ -531,10 +534,10 @@ async def generate_recipe(data: RecipeRequest, user: dict = Depends(get_current_
     if not ingredients:
         raise HTTPException(status_code=400, detail='No ingredients available')
     
+    if not gemini_client:
+        raise HTTPException(status_code=500, detail='AI service not configured')
+    
     try:
-        # Initialize Gemini model
-        model = genai.GenerativeModel('gemini-pro')
-        
         # Create prompt for recipe generation
         prompt = f"""You are a professional chef assistant. Create a creative and practical recipe using these ingredients: {', '.join(ingredients)}
 
@@ -548,8 +551,11 @@ INSTRUCTIONS:
 [step by step instructions]
 COOKING TIME: [time]"""
         
-        # Generate recipe using Gemini
-        response = model.generate_content(prompt)
+        # Generate recipe using new Gemini API
+        response = gemini_client.models.generate_content(
+            model='gemini-2.0-flash-exp',
+            contents=prompt
+        )
         recipe_text = response.text.strip()
         
         # Parse the response
