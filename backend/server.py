@@ -699,9 +699,11 @@ async def delete_my_recipe(recipe_id: str, user: dict = Depends(get_current_user
     if not recipe:
         raise HTTPException(status_code=404, detail='Recipe not found')
     
-    for file in recipe.get('files', []):
-        await db.recipe_files.update_one(
-            {'id': file['id']},
+    # Bulk update all recipe files in a single query (optimization)
+    file_ids = [file['id'] for file in recipe.get('files', [])]
+    if file_ids:
+        await db.recipe_files.update_many(
+            {'id': {'$in': file_ids}},
             {'$set': {'is_deleted': True}}
         )
     
