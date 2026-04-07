@@ -32,9 +32,9 @@ api_router = APIRouter(prefix="/api")
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALGORITHM = "HS256"
 
-STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+STORAGE_URL = os.environ.get('STORAGE_URL', 'https://integrations.emergentagent.com/objstore/api/v1/storage')
 EMERGENT_KEY = os.environ.get('EMERGENT_LLM_KEY')
-APP_NAME = "freshtrack"
+APP_NAME = os.environ.get('APP_NAME', 'freshtrack')
 storage_key = None
 
 def init_storage():
