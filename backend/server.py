@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 import bcrypt
 import jwt
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+import google.generativeai as genai
 import logging
 import uuid
 import cloudinary
@@ -38,6 +38,21 @@ JWT_ALGORITHM = "HS256"
 # Format: cloudinary://API_KEY:API_SECRET@CLOUD_NAME
 STORAGE_URL = os.environ.get('STORAGE_URL', '')
 APP_NAME = os.environ.get('APP_NAME', 'freshtrack')
+
+# Gemini AI configuration
+GEMINI_API_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+
+def init_gemini():
+    """Initialize Gemini AI using EMERGENT_LLM_KEY environment variable"""
+    try:
+        if GEMINI_API_KEY:
+            genai.configure(api_key=GEMINI_API_KEY)
+            logger.info("Gemini AI initialized successfully")
+        else:
+            logger.warning("EMERGENT_LLM_KEY not configured. Recipe generation will not work.")
+    except Exception as e:
+        logger.error(f"Gemini AI initialization failed: {e}")
+        raise
 
 def init_cloudinary():
     """Initialize Cloudinary using STORAGE_URL environment variable"""
@@ -516,13 +531,12 @@ async def generate_recipe(data: RecipeRequest, user: dict = Depends(get_current_
     if not ingredients:
         raise HTTPException(status_code=400, detail='No ingredients available')
     
-    chat = LlmChat(
-        api_key=os.environ['EMERGENT_LLM_KEY'],
-        session_id=f"recipe_{user['_id']}_{datetime.now().timestamp()}",
-        system_message="You are a professional chef assistant. Generate creative, practical recipes based on available ingredients."
-    ).with_model('openai', 'gpt-5.2')
-    
-    prompt = f"""Create a recipe using these ingredients: {', '.join(ingredients)}
+    try:
+        # Initialize Gemini model
+        model = genai.GenerativeModel('gemini-pro')
+        
+        # Create prompt for recipe generation
+        prompt = f"""You are a professional chef assistant. Create a creative and practical recipe using these ingredients: {', '.join(ingredients)}
 
 Provide the response in this exact format:
 RECIPE NAME: [name]
@@ -533,41 +547,45 @@ INGREDIENTS:
 INSTRUCTIONS:
 [step by step instructions]
 COOKING TIME: [time]"""
-    
-    user_message = UserMessage(text=prompt)
-    response = await chat.send_message(user_message)
-    
-    recipe_text = response.strip()
-    lines = recipe_text.split('\n')
-    
-    recipe_name = 'Suggested Recipe'
-    recipe_ingredients = []
-    instructions = ''
-    cooking_time = 'Not specified'
-    
-    current_section = None
-    for line in lines:
-        line = line.strip()
-        if line.startswith('RECIPE NAME:'):
-            recipe_name = line.replace('RECIPE NAME:', '').strip()
-        elif line.startswith('INGREDIENTS:'):
-            current_section = 'ingredients'
-        elif line.startswith('INSTRUCTIONS:'):
-            current_section = 'instructions'
-        elif line.startswith('COOKING TIME:'):
-            cooking_time = line.replace('COOKING TIME:', '').strip()
-            current_section = None
-        elif current_section == 'ingredients' and line.startswith('-'):
-            recipe_ingredients.append(line[1:].strip())
-        elif current_section == 'instructions' and line:
-            instructions += line + '\n'
-    
-    return RecipeResponse(
-        recipe_name=recipe_name,
-        ingredients=recipe_ingredients if recipe_ingredients else ingredients,
-        instructions=instructions.strip() if instructions else recipe_text,
-        cooking_time=cooking_time
-    )
+        
+        # Generate recipe using Gemini
+        response = model.generate_content(prompt)
+        recipe_text = response.text.strip()
+        
+        # Parse the response
+        lines = recipe_text.split('\n')
+        
+        recipe_name = 'Suggested Recipe'
+        recipe_ingredients = []
+        instructions = ''
+        cooking_time = 'Not specified'
+        
+        current_section = None
+        for line in lines:
+            line = line.strip()
+            if line.startswith('RECIPE NAME:'):
+                recipe_name = line.replace('RECIPE NAME:', '').strip()
+            elif line.startswith('INGREDIENTS:'):
+                current_section = 'ingredients'
+            elif line.startswith('INSTRUCTIONS:'):
+                current_section = 'instructions'
+            elif line.startswith('COOKING TIME:'):
+                cooking_time = line.replace('COOKING TIME:', '').strip()
+                current_section = None
+            elif current_section == 'ingredients' and line.startswith('-'):
+                recipe_ingredients.append(line[1:].strip())
+            elif current_section == 'instructions' and line:
+                instructions += line + '\n'
+        
+        return RecipeResponse(
+            recipe_name=recipe_name,
+            ingredients=recipe_ingredients if recipe_ingredients else ingredients,
+            instructions=instructions.strip() if instructions else recipe_text,
+            cooking_time=cooking_time
+        )
+    except Exception as e:
+        logger.error(f"Recipe generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate recipe: {str(e)}")
 
 @api_router.get('/shopping-suggestions', response_model=List[ShoppingSuggestionResponse])
 async def get_shopping_suggestions(user: dict = Depends(get_current_user)):
@@ -845,6 +863,13 @@ async def startup_event():
         logger.info("Cloudinary initialized successfully")
     except Exception as e:
         logger.error(f"Cloudinary initialization failed: {e}")
+    
+    # Initialize Gemini AI
+    try:
+        init_gemini()
+        logger.info("Gemini AI initialized successfully")
+    except Exception as e:
+        logger.error(f"Gemini AI initialization failed: {e}")
     
     admin_email = os.environ.get('ADMIN_EMAIL', 'admin@kitchenapp.com')
     admin_password = os.environ.get('ADMIN_PASSWORD', 'admin123')
