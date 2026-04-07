@@ -131,8 +131,9 @@ export default function MyRecipesTab() {
     }
   };
 
-  const getFileDownloadUrl = (recipeId, fileId) => {
-    return `${process.env.REACT_APP_BACKEND_URL}/api/my-recipes/${recipeId}/files/${fileId}/download`;
+  const getFileDownloadUrl = (file) => {
+    // If file has direct Cloudinary URL, use it; otherwise use API endpoint
+    return file.url || `${process.env.REACT_APP_BACKEND_URL}/api/my-recipes/${file.recipe_id}/files/${file.id}/download`;
   };
 
   if (loading) {
@@ -327,7 +328,7 @@ export default function MyRecipesTab() {
                         </div>
                         <div className="flex gap-1">
                           <a
-                            href={getFileDownloadUrl(recipe.id, file.id)}
+                            href={getFileDownloadUrl(file)}
                             download
                             target="_blank"
                             rel="noopener noreferrer"

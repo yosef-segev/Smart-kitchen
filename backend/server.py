@@ -16,8 +16,10 @@ import bcrypt
 import jwt
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 import logging
-import requests
 import uuid
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,45 +34,58 @@ api_router = APIRouter(prefix="/api")
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALGORITHM = "HS256"
 
-STORAGE_URL = os.environ.get('STORAGE_URL', 'https://integrations.emergentagent.com/objstore/api/v1/storage')
-EMERGENT_KEY = os.environ.get('EMERGENT_LLM_KEY')
+# Cloudinary configuration using STORAGE_URL
+# Format: cloudinary://API_KEY:API_SECRET@CLOUD_NAME
+STORAGE_URL = os.environ.get('STORAGE_URL', '')
 APP_NAME = os.environ.get('APP_NAME', 'freshtrack')
-storage_key = None
 
-def init_storage():
-    global storage_key
-    if storage_key:
-        return storage_key
+def init_cloudinary():
+    """Initialize Cloudinary using STORAGE_URL environment variable"""
     try:
-        resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
-        resp.raise_for_status()
-        storage_key = resp.json()["storage_key"]
-        logger.info("Storage initialized successfully")
-        return storage_key
+        if STORAGE_URL:
+            cloudinary.config(cloudinary_url=STORAGE_URL)
+            logger.info("Cloudinary initialized successfully")
+        else:
+            logger.warning("STORAGE_URL not configured. File uploads will not work.")
     except Exception as e:
-        logger.error(f"Storage init failed: {e}")
+        logger.error(f"Cloudinary initialization failed: {e}")
         raise
 
-def put_object(path: str, data: bytes, content_type: str) -> dict:
-    key = init_storage()
-    resp = requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data,
-        timeout=120
-    )
-    resp.raise_for_status()
-    return resp.json()
+def upload_to_cloudinary(file_content: bytes, filename: str, folder: str) -> dict:
+    """
+    Upload file to Cloudinary
+    Returns: dict with 'secure_url', 'public_id', 'resource_type', 'format', 'bytes'
+    """
+    try:
+        # Upload file to Cloudinary
+        result = cloudinary.uploader.upload(
+            file_content,
+            folder=f"{APP_NAME}/{folder}",
+            resource_type="auto",  # Auto-detect file type (image, raw, video)
+            use_filename=True,
+            unique_filename=True,
+            overwrite=False
+        )
+        
+        return {
+            'secure_url': result['secure_url'],
+            'public_id': result['public_id'],
+            'resource_type': result.get('resource_type', 'raw'),
+            'format': result.get('format', ''),
+            'bytes': result.get('bytes', 0)
+        }
+    except Exception as e:
+        logger.error(f"Cloudinary upload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
 
-def get_object(path: str) -> tuple:
-    key = init_storage()
-    resp = requests.get(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key},
-        timeout=60
-    )
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+def delete_from_cloudinary(public_id: str, resource_type: str = 'raw'):
+    """Delete file from Cloudinary"""
+    try:
+        result = cloudinary.uploader.destroy(public_id, resource_type=resource_type)
+        return result
+    except Exception as e:
+        logger.error(f"Cloudinary delete failed: {e}")
+        # Don't raise exception on delete failure - log and continue
 
 def hash_password(password: str) -> str:
     salt = bcrypt.gensalt()
@@ -722,23 +737,26 @@ async def upload_recipe_file(
     if not recipe:
         raise HTTPException(status_code=404, detail='Recipe not found')
     
-    ext = file.filename.split('.')[-1] if '.' in file.filename else 'bin'
-    file_id = str(uuid.uuid4())
-    storage_path = f"{APP_NAME}/recipes/{user['_id']}/{file_id}.{ext}"
-    
-    data = await file.read()
+    # Read file content
+    file_content = await file.read()
     content_type = file.content_type or 'application/octet-stream'
     
-    storage_result = put_object(storage_path, data, content_type)
+    # Upload to Cloudinary
+    folder = f"recipes/{user['_id']}"
+    cloudinary_result = upload_to_cloudinary(file_content, file.filename, folder)
     
+    file_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
+    
     file_doc = {
         'id': file_id,
         'recipe_id': recipe_id,
-        'storage_path': storage_result['path'],
+        'cloudinary_url': cloudinary_result['secure_url'],
+        'cloudinary_public_id': cloudinary_result['public_id'],
+        'resource_type': cloudinary_result['resource_type'],
         'original_filename': file.filename,
         'content_type': content_type,
-        'size': storage_result['size'],
+        'size': cloudinary_result['bytes'],
         'is_deleted': False,
         'user_id': user['_id'],
         'created_at': now.isoformat()
@@ -748,8 +766,9 @@ async def upload_recipe_file(
     file_ref = {
         'id': file_id,
         'filename': file.filename,
-        'size': storage_result['size'],
-        'content_type': content_type
+        'size': cloudinary_result['bytes'],
+        'content_type': content_type,
+        'url': cloudinary_result['secure_url']
     }
     
     await db.my_recipes.update_one(
@@ -771,18 +790,9 @@ async def download_recipe_file(recipe_id: str, file_id: str, user: dict = Depend
     if not file_record:
         raise HTTPException(status_code=404, detail='File not found')
     
-    try:
-        data, content_type = get_object(file_record['storage_path'])
-        return Response(
-            content=data,
-            media_type=file_record.get('content_type', content_type),
-            headers={
-                'Content-Disposition': f'attachment; filename="{file_record["original_filename"]}"'
-            }
-        )
-    except Exception as e:
-        logger.error(f"Error downloading file: {e}")
-        raise HTTPException(status_code=500, detail='Error downloading file')
+    # Redirect to Cloudinary URL for direct download
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=file_record['cloudinary_url'])
 
 @api_router.delete('/my-recipes/{recipe_id}/files/{file_id}')
 async def delete_recipe_file(recipe_id: str, file_id: str, user: dict = Depends(get_current_user)):
@@ -795,6 +805,14 @@ async def delete_recipe_file(recipe_id: str, file_id: str, user: dict = Depends(
     if not file_record:
         raise HTTPException(status_code=404, detail='File not found')
     
+    # Delete from Cloudinary
+    if 'cloudinary_public_id' in file_record:
+        delete_from_cloudinary(
+            file_record['cloudinary_public_id'],
+            file_record.get('resource_type', 'raw')
+        )
+    
+    # Mark as deleted in database
     await db.recipe_files.update_one(
         {'id': file_id},
         {'$set': {'is_deleted': True}}
@@ -821,11 +839,12 @@ app.add_middleware(
 async def startup_event():
     await db.users.create_index('email', unique=True)
     
+    # Initialize Cloudinary
     try:
-        init_storage()
-        logger.info("Storage initialized successfully")
+        init_cloudinary()
+        logger.info("Cloudinary initialized successfully")
     except Exception as e:
-        logger.error(f"Storage initialization failed: {e}")
+        logger.error(f"Cloudinary initialization failed: {e}")
     
     admin_email = os.environ.get('ADMIN_EMAIL', 'admin@kitchenapp.com')
     admin_password = os.environ.get('ADMIN_PASSWORD', 'admin123')
