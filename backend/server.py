@@ -5,7 +5,7 @@ import os
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, File, UploadFile
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
@@ -16,6 +16,8 @@ import bcrypt
 import jwt
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 import logging
+import requests
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +31,46 @@ api_router = APIRouter(prefix="/api")
 
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALGORITHM = "HS256"
+
+STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+EMERGENT_KEY = os.environ.get('EMERGENT_LLM_KEY')
+APP_NAME = "freshtrack"
+storage_key = None
+
+def init_storage():
+    global storage_key
+    if storage_key:
+        return storage_key
+    try:
+        resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
+        resp.raise_for_status()
+        storage_key = resp.json()["storage_key"]
+        logger.info("Storage initialized successfully")
+        return storage_key
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
+        raise
+
+def put_object(path: str, data: bytes, content_type: str) -> dict:
+    key = init_storage()
+    resp = requests.put(
+        f"{STORAGE_URL}/objects/{path}",
+        headers={"X-Storage-Key": key, "Content-Type": content_type},
+        data=data,
+        timeout=120
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+def get_object(path: str) -> tuple:
+    key = init_storage()
+    resp = requests.get(
+        f"{STORAGE_URL}/objects/{path}",
+        headers={"X-Storage-Key": key},
+        timeout=60
+    )
+    resp.raise_for_status()
+    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
 
 def hash_password(password: str) -> str:
     salt = bcrypt.gensalt()
@@ -136,6 +178,34 @@ class RecipeResponse(BaseModel):
     ingredients: List[str]
     instructions: str
     cooking_time: Optional[str] = None
+
+class ShoppingSuggestionResponse(BaseModel):
+    id: str
+    name: str
+    category: str
+    quantity: float
+    unit: str
+    reason: str
+    source_item_id: Optional[str] = None
+    user_id: str
+    created_at: str
+
+class MyRecipeRequest(BaseModel):
+    title: str
+    description: Optional[str] = None
+    ingredients: Optional[List[str]] = None
+    instructions: Optional[str] = None
+
+class MyRecipeResponse(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = None
+    ingredients: Optional[List[str]] = None
+    instructions: Optional[str] = None
+    files: List[dict]
+    user_id: str
+    created_at: str
+    updated_at: str
 
 @api_router.post('/auth/register', response_model=UserResponse)
 async def register(data: RegisterRequest, response: Response):
@@ -484,6 +554,263 @@ COOKING TIME: [time]"""
         cooking_time=cooking_time
     )
 
+@api_router.get('/shopping-suggestions', response_model=List[ShoppingSuggestionResponse])
+async def get_shopping_suggestions(user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc)
+    suggestions = []
+    
+    inventory_items = await db.inventory.find({'user_id': user['_id']}).to_list(1000)
+    
+    for item in inventory_items:
+        expiry = datetime.fromisoformat(item['expiration_date'].replace('Z', '+00:00'))
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        days_diff = (expiry - now).days
+        
+        should_suggest = False
+        reason = ''
+        
+        if item['quantity'] <= 0:
+            should_suggest = True
+            reason = 'Out of stock'
+        elif days_diff < 0:
+            should_suggest = True
+            reason = 'Expired'
+        
+        if should_suggest:
+            existing_suggestion = await db.shopping_suggestions.find_one({
+                'user_id': user['_id'],
+                'name': item['name'],
+                'status': 'pending'
+            })
+            
+            if not existing_suggestion:
+                suggestion_id = str(uuid.uuid4())
+                suggestion_doc = {
+                    'id': suggestion_id,
+                    'name': item['name'],
+                    'category': item['category'],
+                    'quantity': item['quantity'] if item['quantity'] > 0 else 1,
+                    'unit': item['unit'],
+                    'reason': reason,
+                    'source_item_id': item.get('id'),
+                    'status': 'pending',
+                    'user_id': user['_id'],
+                    'created_at': now.isoformat()
+                }
+                await db.shopping_suggestions.insert_one(suggestion_doc)
+                suggestions.append(ShoppingSuggestionResponse(**suggestion_doc))
+    
+    pending_suggestions = await db.shopping_suggestions.find({
+        'user_id': user['_id'],
+        'status': 'pending'
+    }, {'_id': 0}).to_list(1000)
+    
+    return [ShoppingSuggestionResponse(**s) for s in pending_suggestions]
+
+@api_router.post('/shopping-suggestions/{suggestion_id}/approve')
+async def approve_shopping_suggestion(suggestion_id: str, user: dict = Depends(get_current_user)):
+    suggestion = await db.shopping_suggestions.find_one({
+        'id': suggestion_id,
+        'user_id': user['_id'],
+        'status': 'pending'
+    })
+    
+    if not suggestion:
+        raise HTTPException(status_code=404, detail='Suggestion not found')
+    
+    now = datetime.now(timezone.utc)
+    shopping_item = {
+        'id': str(uuid.uuid4()),
+        'name': suggestion['name'],
+        'category': suggestion['category'],
+        'quantity': suggestion['quantity'],
+        'unit': suggestion['unit'],
+        'purchased': False,
+        'user_id': user['_id'],
+        'created_at': now.isoformat()
+    }
+    await db.shopping_list.insert_one(shopping_item)
+    
+    await db.shopping_suggestions.update_one(
+        {'id': suggestion_id},
+        {'$set': {'status': 'approved'}}
+    )
+    
+    return {'message': 'Suggestion approved and added to shopping list'}
+
+@api_router.delete('/shopping-suggestions/{suggestion_id}')
+async def reject_shopping_suggestion(suggestion_id: str, user: dict = Depends(get_current_user)):
+    result = await db.shopping_suggestions.update_one(
+        {'id': suggestion_id, 'user_id': user['_id'], 'status': 'pending'},
+        {'$set': {'status': 'rejected'}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail='Suggestion not found')
+    return {'message': 'Suggestion rejected'}
+
+@api_router.post('/my-recipes', response_model=MyRecipeResponse)
+async def create_my_recipe(data: MyRecipeRequest, user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc)
+    recipe_id = str(uuid.uuid4())
+    recipe_doc = {
+        'id': recipe_id,
+        'title': data.title,
+        'description': data.description,
+        'ingredients': data.ingredients or [],
+        'instructions': data.instructions,
+        'files': [],
+        'user_id': user['_id'],
+        'created_at': now.isoformat(),
+        'updated_at': now.isoformat()
+    }
+    await db.my_recipes.insert_one(recipe_doc)
+    return MyRecipeResponse(**recipe_doc)
+
+@api_router.get('/my-recipes', response_model=List[MyRecipeResponse])
+async def get_my_recipes(user: dict = Depends(get_current_user)):
+    recipes = await db.my_recipes.find({'user_id': user['_id']}, {'_id': 0}).to_list(1000)
+    return [MyRecipeResponse(**r) for r in recipes]
+
+@api_router.get('/my-recipes/{recipe_id}', response_model=MyRecipeResponse)
+async def get_my_recipe(recipe_id: str, user: dict = Depends(get_current_user)):
+    recipe = await db.my_recipes.find_one({'id': recipe_id, 'user_id': user['_id']}, {'_id': 0})
+    if not recipe:
+        raise HTTPException(status_code=404, detail='Recipe not found')
+    return MyRecipeResponse(**recipe)
+
+@api_router.put('/my-recipes/{recipe_id}', response_model=MyRecipeResponse)
+async def update_my_recipe(recipe_id: str, data: MyRecipeRequest, user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc)
+    update_doc = {
+        'title': data.title,
+        'description': data.description,
+        'ingredients': data.ingredients or [],
+        'instructions': data.instructions,
+        'updated_at': now.isoformat()
+    }
+    result = await db.my_recipes.update_one(
+        {'id': recipe_id, 'user_id': user['_id']},
+        {'$set': update_doc}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail='Recipe not found')
+    
+    recipe = await db.my_recipes.find_one({'id': recipe_id}, {'_id': 0})
+    return MyRecipeResponse(**recipe)
+
+@api_router.delete('/my-recipes/{recipe_id}')
+async def delete_my_recipe(recipe_id: str, user: dict = Depends(get_current_user)):
+    recipe = await db.my_recipes.find_one({'id': recipe_id, 'user_id': user['_id']})
+    if not recipe:
+        raise HTTPException(status_code=404, detail='Recipe not found')
+    
+    for file in recipe.get('files', []):
+        await db.recipe_files.update_one(
+            {'id': file['id']},
+            {'$set': {'is_deleted': True}}
+        )
+    
+    result = await db.my_recipes.delete_one({'id': recipe_id, 'user_id': user['_id']})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail='Recipe not found')
+    return {'message': 'Recipe deleted successfully'}
+
+@api_router.post('/my-recipes/{recipe_id}/upload')
+async def upload_recipe_file(
+    recipe_id: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user)
+):
+    recipe = await db.my_recipes.find_one({'id': recipe_id, 'user_id': user['_id']})
+    if not recipe:
+        raise HTTPException(status_code=404, detail='Recipe not found')
+    
+    ext = file.filename.split('.')[-1] if '.' in file.filename else 'bin'
+    file_id = str(uuid.uuid4())
+    storage_path = f"{APP_NAME}/recipes/{user['_id']}/{file_id}.{ext}"
+    
+    data = await file.read()
+    content_type = file.content_type or 'application/octet-stream'
+    
+    storage_result = put_object(storage_path, data, content_type)
+    
+    now = datetime.now(timezone.utc)
+    file_doc = {
+        'id': file_id,
+        'recipe_id': recipe_id,
+        'storage_path': storage_result['path'],
+        'original_filename': file.filename,
+        'content_type': content_type,
+        'size': storage_result['size'],
+        'is_deleted': False,
+        'user_id': user['_id'],
+        'created_at': now.isoformat()
+    }
+    await db.recipe_files.insert_one(file_doc)
+    
+    file_ref = {
+        'id': file_id,
+        'filename': file.filename,
+        'size': storage_result['size'],
+        'content_type': content_type
+    }
+    
+    await db.my_recipes.update_one(
+        {'id': recipe_id},
+        {'$push': {'files': file_ref}}
+    )
+    
+    return file_ref
+
+@api_router.get('/my-recipes/{recipe_id}/files/{file_id}/download')
+async def download_recipe_file(recipe_id: str, file_id: str, user: dict = Depends(get_current_user)):
+    file_record = await db.recipe_files.find_one({
+        'id': file_id,
+        'recipe_id': recipe_id,
+        'user_id': user['_id'],
+        'is_deleted': False
+    })
+    
+    if not file_record:
+        raise HTTPException(status_code=404, detail='File not found')
+    
+    try:
+        data, content_type = get_object(file_record['storage_path'])
+        return Response(
+            content=data,
+            media_type=file_record.get('content_type', content_type),
+            headers={
+                'Content-Disposition': f'attachment; filename="{file_record["original_filename"]}"'
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error downloading file: {e}")
+        raise HTTPException(status_code=500, detail='Error downloading file')
+
+@api_router.delete('/my-recipes/{recipe_id}/files/{file_id}')
+async def delete_recipe_file(recipe_id: str, file_id: str, user: dict = Depends(get_current_user)):
+    file_record = await db.recipe_files.find_one({
+        'id': file_id,
+        'recipe_id': recipe_id,
+        'user_id': user['_id']
+    })
+    
+    if not file_record:
+        raise HTTPException(status_code=404, detail='File not found')
+    
+    await db.recipe_files.update_one(
+        {'id': file_id},
+        {'$set': {'is_deleted': True}}
+    )
+    
+    await db.my_recipes.update_one(
+        {'id': recipe_id},
+        {'$pull': {'files': {'id': file_id}}}
+    )
+    
+    return {'message': 'File deleted successfully'}
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -497,6 +824,12 @@ app.add_middleware(
 @app.on_event('startup')
 async def startup_event():
     await db.users.create_index('email', unique=True)
+    
+    try:
+        init_storage()
+        logger.info("Storage initialized successfully")
+    except Exception as e:
+        logger.error(f"Storage initialization failed: {e}")
     
     admin_email = os.environ.get('ADMIN_EMAIL', 'admin@kitchenapp.com')
     admin_password = os.environ.get('ADMIN_PASSWORD', 'admin123')

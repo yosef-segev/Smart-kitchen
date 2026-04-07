@@ -3,10 +3,12 @@ import { Route, Routes, Navigate, useNavigate, useLocation } from 'react-router-
 import axios from 'axios';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from '../components/ui/button';
-import { Package, ShoppingCart, ChefHat, BarChart3, LogOut } from 'lucide-react';
+import { Package, ShoppingCart, ChefHat, BarChart3, LogOut, Bell, BookOpen } from 'lucide-react';
 import InventoryTab from '../components/InventoryTab';
 import ShoppingListTab from '../components/ShoppingListTab';
+import ShoppingSuggestionsTab from '../components/ShoppingSuggestionsTab';
 import RecipesTab from '../components/RecipesTab';
+import MyRecipesTab from '../components/MyRecipesTab';
 import AnalyticsTab from '../components/AnalyticsTab';
 
 export default function Dashboard() {
@@ -24,7 +26,9 @@ export default function Dashboard() {
   const navItems = [
     { path: '/dashboard/inventory', icon: Package, label: 'Inventory' },
     { path: '/dashboard/shopping', icon: ShoppingCart, label: 'Shopping' },
-    { path: '/dashboard/recipes', icon: ChefHat, label: 'Recipes' },
+    { path: '/dashboard/suggestions', icon: Bell, label: 'Suggestions' },
+    { path: '/dashboard/recipes', icon: ChefHat, label: 'AI Recipes' },
+    { path: '/dashboard/my-recipes', icon: BookOpen, label: 'My Recipes' },
     { path: '/dashboard/analytics', icon: BarChart3, label: 'Analytics' },
   ];
 
@@ -87,7 +91,9 @@ export default function Dashboard() {
             <Route path="/" element={<Navigate to="/dashboard/inventory" replace />} />
             <Route path="/inventory" element={<InventoryTab />} />
             <Route path="/shopping" element={<ShoppingListTab />} />
+            <Route path="/suggestions" element={<ShoppingSuggestionsTab />} />
             <Route path="/recipes" element={<RecipesTab />} />
+            <Route path="/my-recipes" element={<MyRecipesTab />} />
             <Route path="/analytics" element={<AnalyticsTab />} />
           </Routes>
         </div>
@@ -96,17 +102,17 @@ export default function Dashboard() {
       {/* Mobile Bottom Navigation */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-[#E6E8E3] z-50">
         <nav className="flex items-center justify-around px-2 py-3">
-          {navItems.map((item) => {
+          {navItems.filter(item => ['Inventory', 'Shopping', 'Suggestions', 'My Recipes'].includes(item.label)).map((item) => {
             const Icon = item.icon;
             const isActive = currentPath.startsWith(item.path);
             return (
               <button
                 key={item.path}
                 onClick={() => navigate(item.path)}
-                className={`flex flex-col items-center gap-1 px-4 py-2 rounded-xl transition-all duration-300 ${
+                className={`flex flex-col items-center gap-1 px-2 py-2 rounded-xl transition-all duration-300 ${
                   isActive ? 'text-[#4A5D23]' : 'text-[#6B7262]'
                 }`}
-                data-testid={`mobile-nav-${item.label.toLowerCase()}`}
+                data-testid={`mobile-nav-${item.label.toLowerCase().replace(' ', '-')}`}
               >
                 <Icon className="w-5 h-5" />
                 <span className="text-xs font-medium">{item.label}</span>
