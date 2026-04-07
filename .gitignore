@@ -46,3 +46,7 @@ Thumbs.db
 .env.local
 .env.*.local
 frontend/node_modules/.cache/default-development/5.pack
+-e 
+# Environment files
+*.env
+*.env.*
