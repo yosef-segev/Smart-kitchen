@@ -557,7 +557,13 @@ COOKING TIME: [time]"""
 @api_router.get('/shopping-suggestions', response_model=List[ShoppingSuggestionResponse])
 async def get_shopping_suggestions(user: dict = Depends(get_current_user)):
     now = datetime.now(timezone.utc)
-    suggestions = []
+    
+    # Fetch all pending suggestions once (optimization to avoid N+1 queries)
+    existing_suggestions = await db.shopping_suggestions.find({
+        'user_id': user['_id'],
+        'status': 'pending'
+    }, {'_id': 0}).to_list(1000)
+    pending_suggestions_map = {s['name']: s for s in existing_suggestions}
     
     inventory_items = await db.inventory.find({'user_id': user['_id']}).to_list(1000)
     
@@ -577,36 +583,24 @@ async def get_shopping_suggestions(user: dict = Depends(get_current_user)):
             should_suggest = True
             reason = 'Expired'
         
-        if should_suggest:
-            existing_suggestion = await db.shopping_suggestions.find_one({
-                'user_id': user['_id'],
+        if should_suggest and item['name'] not in pending_suggestions_map:
+            suggestion_id = str(uuid.uuid4())
+            suggestion_doc = {
+                'id': suggestion_id,
                 'name': item['name'],
-                'status': 'pending'
-            })
-            
-            if not existing_suggestion:
-                suggestion_id = str(uuid.uuid4())
-                suggestion_doc = {
-                    'id': suggestion_id,
-                    'name': item['name'],
-                    'category': item['category'],
-                    'quantity': item['quantity'] if item['quantity'] > 0 else 1,
-                    'unit': item['unit'],
-                    'reason': reason,
-                    'source_item_id': item.get('id'),
-                    'status': 'pending',
-                    'user_id': user['_id'],
-                    'created_at': now.isoformat()
-                }
-                await db.shopping_suggestions.insert_one(suggestion_doc)
-                suggestions.append(ShoppingSuggestionResponse(**suggestion_doc))
+                'category': item['category'],
+                'quantity': item['quantity'] if item['quantity'] > 0 else 1,
+                'unit': item['unit'],
+                'reason': reason,
+                'source_item_id': item.get('id'),
+                'status': 'pending',
+                'user_id': user['_id'],
+                'created_at': now.isoformat()
+            }
+            await db.shopping_suggestions.insert_one(suggestion_doc)
+            pending_suggestions_map[item['name']] = suggestion_doc
     
-    pending_suggestions = await db.shopping_suggestions.find({
-        'user_id': user['_id'],
-        'status': 'pending'
-    }, {'_id': 0}).to_list(1000)
-    
-    return [ShoppingSuggestionResponse(**s) for s in pending_suggestions]
+    return [ShoppingSuggestionResponse(**s) for s in pending_suggestions_map.values()]
 
 @api_router.post('/shopping-suggestions/{suggestion_id}/approve')
 async def approve_shopping_suggestion(suggestion_id: str, user: dict = Depends(get_current_user)):
