@@ -1,0 +1,99 @@
+{
+  "theme": "LIGHT",
+  "archetype": "1 (Organic & Earthy)",
+  "typography": {
+    "heading_font": "Outfit",
+    "body_font": "Manrope",
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl tracking-tight font-semibold",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-medium",
+      "h3": "text-xl sm:text-2xl tracking-tight font-medium",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm",
+      "overline": "text-xs uppercase tracking-[0.2em] font-medium"
+    }
+  },
+  "colors": {
+    "background": "#FDFDF9",
+    "surface": "#FFFFFF",
+    "primary": {
+      "DEFAULT": "#4A5D23",
+      "foreground": "#FFFFFF",
+      "hover": "#3D4D1D"
+    },
+    "text": {
+      "main": "#1A2015",
+      "muted": "#6B7262"
+    },
+    "status": {
+      "fresh": {
+        "bg": "#F2F7EC",
+        "text": "#416620",
+        "border": "#DCE8D0"
+      },
+      "expiring": {
+        "bg": "#FFF8EC",
+        "text": "#9B6B15",
+        "border": "#F3E1C5"
+      },
+      "expired": {
+        "bg": "#FDF2F1",
+        "text": "#90352A",
+        "border": "#F5D8D5"
+      }
+    },
+    "border": "#E6E8E3"
+  },
+  "spacing_and_layout": {
+    "philosophy": "Generous spacing. Tactile and grounded feel.",
+    "container_padding": "p-6 sm:p-8",
+    "gap": "gap-6",
+    "border_radius": "rounded-2xl",
+    "card_style": "bg-white border border-[#E6E8E3] shadow-sm",
+    "list_item_style": "py-4 border-b border-[#E6E8E3] last:border-0",
+    "mobile_first": true
+  },
+  "components": {
+    "navigation": "Bottom tab bar for mobile, sidebar for desktop. Minimalist with clear active states using a rectangle highlight or subtle primary color bg.",
+    "buttons": "Rounded-xl, generous padding (px-6 py-3), font-medium. Primary buttons use #4A5D23 with white text. Hover states elevate slightly (-translate-y-0.5) and darken bg.",
+    "badges": "Pill-shaped (rounded-full), bold text. Used for status (Fresh/Expiring/Expired).",
+    "inputs": "Shadcn based. 1px border-[#E6E8E3], bg-white/50 focus:bg-white focus:ring-2 focus:ring-[#4A5D23]/20 focus:border-[#4A5D23] transition-all duration-200.",
+    "cards": "Avoid default card shadow overload. Use 1px border with a very subtle drop shadow: shadow-[0_2px_8px_rgba(26,32,21,0.04)].",
+    "charts": "Recharts. Use monochromatic shades of primary green (#4A5D23, #6B8E23, #DCE8D0) for analytics to keep the dashboard grounded."
+  },
+  "motion": {
+    "hover": "transition-all duration-300 ease-out",
+    "page_transition": "framer-motion opacity and slight y-axis slide (y: 10 to 0).",
+    "list_stagger": "staggerChildren: 0.05 for list items."
+  },
+  "icons": {
+    "library": "lucide-react",
+    "style": "stroke-width: 1.5. Clean, legible."
+  },
+  "media": {
+    "image_urls": {
+      "hero_or_empty_pantry": {
+        "url": "https://images.unsplash.com/photo-1768875845344-5663fa9acf15?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2ODh8MHwxfHNlYXJjaHwxfHxwYW50cnklMjBvcmdhbml6YXRpb258ZW58MHx8fHwxNzc1NTUzMDkyfDA&ixlib=rb-4.1.0&q=85",
+        "description": "Woman organizing food in a well-stocked pantry. Use for onboarding hero or empty state background."
+      },
+      "fresh_vegetables_bg": {
+        "url": "https://images.unsplash.com/photo-1730984654496-a3d3cb84179c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjV8MHwxfHNlYXJjaHwyfHxmcmVzaCUyMHZlZ2V0YWJsZXMlMjBraXRjaGVufGVufDB8fHx8MTc3NTU1MzA5Mnww&ixlib=rb-4.1.0&q=85",
+        "description": "A kitchen counter with vegetables. Good for 'Recipes' section header."
+      },
+      "cooking_meal": {
+        "url": "https://images.unsplash.com/photo-1739656442968-c6b6bcb48752?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjd8MHwxfHNlYXJjaHwzfHxjb29raW5nJTIwZnJlc2glMjBtZWFsfGVufDB8fHx8MTc3NTU1MzA5Mnww&ixlib=rb-4.1.0&q=85",
+        "description": "Pan filled with green beans on stove. Good for 'Smart Recipes' card image."
+      }
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the 'Organic & Earthy' archetype color palette. Do not use generic blues or purples.",
+    "Implement Expiration Tracking color-coding strictly using the 'status' colors provided.",
+    "For the Inventory list, use a dense, clean layout (list_item_style). Do not put every item in its own standalone card.",
+    "Build a bottom navigation bar for mobile sizes and a sidebar for md+ screens.",
+    "Add 'data-testid' to all interactive elements (buttons, inputs, navigation links).",
+    "Use Shadcn UI but heavily customize the colors and border-radius to match these guidelines.",
+    "Use standard HTML inputs for simple text, but Shadcn Select/Dialog for complex interactions."
+  ]
+}
