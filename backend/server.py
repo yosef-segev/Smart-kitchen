@@ -1,89 +1,548 @@
-from fastapi import FastAPI, APIRouter
 from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
-from datetime import datetime, timezone
-
+import os
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field, EmailStr
+from typing import List, Optional
+from datetime import datetime, timezone, timedelta
+from bson import ObjectId
+import bcrypt
+import jwt
+from emergentintegrations.llm.chat import LlmChat, UserMessage
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
 app = FastAPI()
-
-# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
+JWT_SECRET = os.environ['JWT_SECRET']
+JWT_ALGORITHM = "HS256"
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
+def hash_password(password: str) -> str:
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+def create_access_token(user_id: str, email: str) -> str:
+    payload = {
+        'sub': user_id,
+        'email': email,
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=15),
+        'type': 'access'
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def create_refresh_token(user_id: str) -> str:
+    payload = {
+        'sub': user_id,
+        'exp': datetime.now(timezone.utc) + timedelta(days=7),
+        'type': 'refresh'
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+async def get_current_user(request: Request) -> dict:
+    token = request.cookies.get('access_token')
+    if not token:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            token = auth_header[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail='Not authenticated')
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get('type') != 'access':
+            raise HTTPException(status_code=401, detail='Invalid token type')
+        user = await db.users.find_one({'_id': ObjectId(payload['sub'])})
+        if not user:
+            raise HTTPException(status_code=401, detail='User not found')
+        user['_id'] = str(user['_id'])
+        user.pop('password_hash', None)
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail='Token expired')
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail='Invalid token')
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    name: str
+    role: Optional[str] = 'user'
+
+class InventoryItemRequest(BaseModel):
+    name: str
+    category: str
+    quantity: float
+    unit: str
+    expiration_date: str
+
+class InventoryItemResponse(BaseModel):
+    id: str
+    name: str
+    category: str
+    quantity: float
+    unit: str
+    expiration_date: str
+    status: str
+    user_id: str
+    created_at: str
+    updated_at: str
+
+class ShoppingItemRequest(BaseModel):
+    name: str
+    category: str
+    quantity: Optional[float] = 1
+    unit: Optional[str] = 'unit'
+
+class ShoppingItemResponse(BaseModel):
+    id: str
+    name: str
+    category: str
+    quantity: float
+    unit: str
+    purchased: bool
+    user_id: str
+    created_at: str
+
+class RecipeRequest(BaseModel):
+    ingredients: Optional[List[str]] = None
+
+class RecipeResponse(BaseModel):
+    recipe_name: str
+    ingredients: List[str]
+    instructions: str
+    cooking_time: Optional[str] = None
+
+@api_router.post('/auth/register', response_model=UserResponse)
+async def register(data: RegisterRequest, response: Response):
+    email = data.email.lower()
+    existing = await db.users.find_one({'email': email})
+    if existing:
+        raise HTTPException(status_code=400, detail='Email already registered')
     
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-class StatusCheckCreate(BaseModel):
-    client_name: str
-
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
-
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
+    user_doc = {
+        'email': email,
+        'password_hash': hash_password(data.password),
+        'name': data.name,
+        'role': 'user',
+        'created_at': datetime.now(timezone.utc)
+    }
+    result = await db.users.insert_one(user_doc)
+    user_id = str(result.inserted_id)
     
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
+    access_token = create_access_token(user_id, email)
+    refresh_token = create_refresh_token(user_id)
     
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+    response.set_cookie(
+        key='access_token',
+        value=access_token,
+        httponly=True,
+        secure=False,
+        samesite='lax',
+        max_age=900,
+        path='/'
+    )
+    response.set_cookie(
+        key='refresh_token',
+        value=refresh_token,
+        httponly=True,
+        secure=False,
+        samesite='lax',
+        max_age=604800,
+        path='/'
+    )
+    
+    return UserResponse(id=user_id, email=email, name=data.name, role='user')
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+@api_router.post('/auth/login', response_model=UserResponse)
+async def login(data: LoginRequest, response: Response):
+    email = data.email.lower()
+    user = await db.users.find_one({'email': email})
+    if not user or not verify_password(data.password, user['password_hash']):
+        raise HTTPException(status_code=401, detail='Invalid credentials')
     
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
+    user_id = str(user['_id'])
+    access_token = create_access_token(user_id, email)
+    refresh_token = create_refresh_token(user_id)
     
-    return status_checks
+    response.set_cookie(
+        key='access_token',
+        value=access_token,
+        httponly=True,
+        secure=False,
+        samesite='lax',
+        max_age=900,
+        path='/'
+    )
+    response.set_cookie(
+        key='refresh_token',
+        value=refresh_token,
+        httponly=True,
+        secure=False,
+        samesite='lax',
+        max_age=604800,
+        path='/'
+    )
+    
+    return UserResponse(id=user_id, email=email, name=user['name'], role=user.get('role', 'user'))
 
-# Include the router in the main app
+@api_router.post('/auth/logout')
+async def logout(response: Response):
+    response.delete_cookie('access_token', path='/')
+    response.delete_cookie('refresh_token', path='/')
+    return {'message': 'Logged out successfully'}
+
+@api_router.get('/auth/me', response_model=UserResponse)
+async def get_me(user: dict = Depends(get_current_user)):
+    return UserResponse(id=user['_id'], email=user['email'], name=user['name'], role=user.get('role', 'user'))
+
+@api_router.post('/inventory', response_model=InventoryItemResponse)
+async def create_inventory_item(data: InventoryItemRequest, user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc)
+    expiry = datetime.fromisoformat(data.expiration_date.replace('Z', '+00:00'))
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    days_diff = (expiry - now).days
+    
+    if days_diff < 0:
+        status = 'expired'
+    elif days_diff <= 2:
+        status = 'expiring'
+    else:
+        status = 'fresh'
+    
+    item_doc = {
+        'name': data.name,
+        'category': data.category,
+        'quantity': data.quantity,
+        'unit': data.unit,
+        'expiration_date': data.expiration_date,
+        'status': status,
+        'user_id': user['_id'],
+        'created_at': now.isoformat(),
+        'updated_at': now.isoformat()
+    }
+    result = await db.inventory.insert_one(item_doc)
+    
+    await db.purchase_history.insert_one({
+        'item_name': data.name,
+        'category': data.category,
+        'user_id': user['_id'],
+        'purchased_at': now.isoformat()
+    })
+    
+    return InventoryItemResponse(
+        id=str(result.inserted_id),
+        name=data.name,
+        category=data.category,
+        quantity=data.quantity,
+        unit=data.unit,
+        expiration_date=data.expiration_date,
+        status=status,
+        user_id=user['_id'],
+        created_at=now.isoformat(),
+        updated_at=now.isoformat()
+    )
+
+@api_router.get('/inventory', response_model=List[InventoryItemResponse])
+async def get_inventory(user: dict = Depends(get_current_user)):
+    items = await db.inventory.find({'user_id': user['_id']}).to_list(1000)
+    
+    now = datetime.now(timezone.utc)
+    result = []
+    for item in items:
+        expiry = datetime.fromisoformat(item['expiration_date'].replace('Z', '+00:00'))
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        days_diff = (expiry - now).days
+        
+        if days_diff < 0:
+            item['status'] = 'expired'
+        elif days_diff <= 2:
+            item['status'] = 'expiring'
+        else:
+            item['status'] = 'fresh'
+        
+        if item['quantity'] <= 0:
+            item['status'] = 'expired'
+        
+        # Convert MongoDB _id to id for response
+        item['id'] = str(item['_id'])
+        item.pop('_id', None)
+        
+        result.append(InventoryItemResponse(**item))
+    
+    return result
+
+@api_router.put('/inventory/{item_id}', response_model=InventoryItemResponse)
+async def update_inventory_item(item_id: str, data: InventoryItemRequest, user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc)
+    expiry = datetime.fromisoformat(data.expiration_date.replace('Z', '+00:00'))
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    days_diff = (expiry - now).days
+    
+    if days_diff < 0:
+        status = 'expired'
+    elif days_diff <= 2:
+        status = 'expiring'
+    else:
+        status = 'fresh'
+    
+    if data.quantity <= 0:
+        status = 'expired'
+    
+    update_doc = {
+        'name': data.name,
+        'category': data.category,
+        'quantity': data.quantity,
+        'unit': data.unit,
+        'expiration_date': data.expiration_date,
+        'status': status,
+        'updated_at': now.isoformat()
+    }
+    
+    result = await db.inventory.update_one(
+        {'_id': ObjectId(item_id), 'user_id': user['_id']},
+        {'$set': update_doc}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail='Item not found')
+    
+    return InventoryItemResponse(
+        id=item_id,
+        user_id=user['_id'],
+        created_at=now.isoformat(),
+        **update_doc
+    )
+
+@api_router.delete('/inventory/{item_id}')
+async def delete_inventory_item(item_id: str, user: dict = Depends(get_current_user)):
+    result = await db.inventory.delete_one({'_id': ObjectId(item_id), 'user_id': user['_id']})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail='Item not found')
+    return {'message': 'Item deleted successfully'}
+
+@api_router.get('/shopping-list', response_model=List[ShoppingItemResponse])
+async def get_shopping_list(user: dict = Depends(get_current_user)):
+    items = await db.shopping_list.find({'user_id': user['_id']}, {'_id': 0}).to_list(1000)
+    return [ShoppingItemResponse(**item) for item in items]
+
+@api_router.post('/shopping-list', response_model=ShoppingItemResponse)
+async def add_shopping_item(data: ShoppingItemRequest, user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc)
+    item_doc = {
+        'id': str(ObjectId()),
+        'name': data.name,
+        'category': data.category,
+        'quantity': data.quantity,
+        'unit': data.unit,
+        'purchased': False,
+        'user_id': user['_id'],
+        'created_at': now.isoformat()
+    }
+    await db.shopping_list.insert_one(item_doc)
+    return ShoppingItemResponse(**item_doc)
+
+@api_router.put('/shopping-list/{item_id}/toggle')
+async def toggle_shopping_item(item_id: str, user: dict = Depends(get_current_user)):
+    item = await db.shopping_list.find_one({'id': item_id, 'user_id': user['_id']})
+    if not item:
+        raise HTTPException(status_code=404, detail='Item not found')
+    
+    new_status = not item['purchased']
+    await db.shopping_list.update_one(
+        {'id': item_id, 'user_id': user['_id']},
+        {'$set': {'purchased': new_status}}
+    )
+    return {'purchased': new_status}
+
+@api_router.delete('/shopping-list/{item_id}')
+async def delete_shopping_item(item_id: str, user: dict = Depends(get_current_user)):
+    result = await db.shopping_list.delete_one({'id': item_id, 'user_id': user['_id']})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail='Item not found')
+    return {'message': 'Item deleted successfully'}
+
+@api_router.get('/analytics')
+async def get_analytics(user: dict = Depends(get_current_user)):
+    history = await db.purchase_history.find({'user_id': user['_id']}).to_list(1000)
+    
+    item_frequency = {}
+    for purchase in history:
+        item_name = purchase['item_name']
+        item_frequency[item_name] = item_frequency.get(item_name, 0) + 1
+    
+    sorted_items = sorted(item_frequency.items(), key=lambda x: x[1], reverse=True)
+    frequent_items = [{'name': name, 'count': count} for name, count in sorted_items[:10]]
+    
+    inventory_count = await db.inventory.count_documents({'user_id': user['_id']})
+    shopping_count = await db.shopping_list.count_documents({'user_id': user['_id'], 'purchased': False})
+    
+    expiring_count = await db.inventory.count_documents({
+        'user_id': user['_id'],
+        'status': {'$in': ['expiring', 'expired']}
+    })
+    
+    return {
+        'frequent_items': frequent_items,
+        'total_inventory': inventory_count,
+        'shopping_list_count': shopping_count,
+        'expiring_count': expiring_count
+    }
+
+@api_router.post('/recipes/generate', response_model=RecipeResponse)
+async def generate_recipe(data: RecipeRequest, user: dict = Depends(get_current_user)):
+    if data.ingredients:
+        ingredients = data.ingredients
+    else:
+        items = await db.inventory.find({
+            'user_id': user['_id'],
+            'status': 'fresh',
+            'quantity': {'$gt': 0}
+        }, {'_id': 0, 'name': 1}).to_list(100)
+        ingredients = [item['name'] for item in items]
+    
+    if not ingredients:
+        raise HTTPException(status_code=400, detail='No ingredients available')
+    
+    chat = LlmChat(
+        api_key=os.environ['EMERGENT_LLM_KEY'],
+        session_id=f"recipe_{user['_id']}_{datetime.now().timestamp()}",
+        system_message="You are a professional chef assistant. Generate creative, practical recipes based on available ingredients."
+    ).with_model('openai', 'gpt-5.2')
+    
+    prompt = f"""Create a recipe using these ingredients: {', '.join(ingredients)}
+
+Provide the response in this exact format:
+RECIPE NAME: [name]
+INGREDIENTS:
+- [ingredient 1]
+- [ingredient 2]
+...
+INSTRUCTIONS:
+[step by step instructions]
+COOKING TIME: [time]"""
+    
+    user_message = UserMessage(text=prompt)
+    response = await chat.send_message(user_message)
+    
+    recipe_text = response.strip()
+    lines = recipe_text.split('\n')
+    
+    recipe_name = 'Suggested Recipe'
+    recipe_ingredients = []
+    instructions = ''
+    cooking_time = 'Not specified'
+    
+    current_section = None
+    for line in lines:
+        line = line.strip()
+        if line.startswith('RECIPE NAME:'):
+            recipe_name = line.replace('RECIPE NAME:', '').strip()
+        elif line.startswith('INGREDIENTS:'):
+            current_section = 'ingredients'
+        elif line.startswith('INSTRUCTIONS:'):
+            current_section = 'instructions'
+        elif line.startswith('COOKING TIME:'):
+            cooking_time = line.replace('COOKING TIME:', '').strip()
+            current_section = None
+        elif current_section == 'ingredients' and line.startswith('-'):
+            recipe_ingredients.append(line[1:].strip())
+        elif current_section == 'instructions' and line:
+            instructions += line + '\n'
+    
+    return RecipeResponse(
+        recipe_name=recipe_name,
+        ingredients=recipe_ingredients if recipe_ingredients else ingredients,
+        instructions=instructions.strip() if instructions else recipe_text,
+        cooking_time=cooking_time
+    )
+
 app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
     allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=['*'],
+    allow_headers=['*'],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+@app.on_event('startup')
+async def startup_event():
+    await db.users.create_index('email', unique=True)
+    
+    admin_email = os.environ.get('ADMIN_EMAIL', 'admin@kitchenapp.com')
+    admin_password = os.environ.get('ADMIN_PASSWORD', 'admin123')
+    existing = await db.users.find_one({'email': admin_email})
+    if existing is None:
+        hashed = hash_password(admin_password)
+        await db.users.insert_one({
+            'email': admin_email,
+            'password_hash': hashed,
+            'name': 'Admin',
+            'role': 'admin',
+            'created_at': datetime.now(timezone.utc)
+        })
+        logger.info(f'Admin user created: {admin_email}')
+    elif not verify_password(admin_password, existing['password_hash']):
+        await db.users.update_one(
+            {'email': admin_email},
+            {'$set': {'password_hash': hash_password(admin_password)}}
+        )
+    
+    Path('/app/memory').mkdir(exist_ok=True)
+    with open('/app/memory/test_credentials.md', 'w') as f:
+        f.write(f"""# Test Credentials
 
-@app.on_event("shutdown")
+## Admin Account
+- Email: {admin_email}
+- Password: {admin_password}
+- Role: admin
+
+## API Endpoints
+- POST /api/auth/register
+- POST /api/auth/login
+- POST /api/auth/logout
+- GET /api/auth/me
+- GET /api/inventory
+- POST /api/inventory
+- PUT /api/inventory/{{item_id}}
+- DELETE /api/inventory/{{item_id}}
+- GET /api/shopping-list
+- POST /api/shopping-list
+- PUT /api/shopping-list/{{item_id}}/toggle
+- DELETE /api/shopping-list/{{item_id}}
+- GET /api/analytics
+- POST /api/recipes/generate
+""")
+
+@app.on_event('shutdown')
 async def shutdown_db_client():
     client.close()
