@@ -61,6 +61,10 @@
   "test": "craco test",
   "eject": "react-scripts eject"
 },
+  "overrides": {
+  "ajv": "^8.12.0",
+  "ajv-keywords": "^5.1.0"
+},
   "browserslist": {
     "production": [
       ">0.2%",
